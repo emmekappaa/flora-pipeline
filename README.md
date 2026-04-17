@@ -2,7 +2,7 @@
 
 > Automated content generation pipeline for [Flora: Flower of the Day](https://apps.apple.com/it/app/flora-fiore-del-giorno/id6759986494) — the iOS app that celebrates a new flower every day.
 
-<img src="image1.jpg" width="300"/>
+<img src="mdimg/image1.jpg" width="300"/>
 
 Adding a new flower to Flora used to mean manually sourcing photos, writing descriptions, translating content into 6 languages, and wiring up every asset by hand. This pipeline automates the entire process: give it a Latin name, get back production-ready Xcode assets in under a minute.
 
