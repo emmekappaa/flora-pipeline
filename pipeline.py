@@ -366,9 +366,30 @@ def step3_wikimedia(latin_name: str) -> tuple:
             r"|watercolor|lithograph|engraving|sketch|museum|naturalis"
             r"|greenhouse|favourite.flowers|garden.and.greenhouse"
             r"|stamp|colnect|rcin|royal.collection|postage"
-            r"|flickr|\d{7,}",   # Flickr photo IDs / institutional IDs in filenames
+            r"|flickr|\d{7,}",
             re.IGNORECASE,
         )
+
+        # Words that suggest a detail/macro shot rather than the whole plant
+        DETAIL_WORDS = re.compile(
+            r"\bleaf\b|\bleaves\b|\bbranch\b|\bstem\b|\bdetail\b"
+            r"|\bmacro\b|\bclose.up\b|\bseed\b|\bfruit\b|\broot\b",
+            re.IGNORECASE,
+        )
+
+        # Words that suggest a good whole-plant/flower shot (bonus score)
+        FLOWER_WORDS = re.compile(
+            r"\bflower\b|\bbloom\b|\bplant\b|\bblossom\b|\binflorescence\b",
+            re.IGNORECASE,
+        )
+
+        def _score(item: dict) -> int:
+            title = item.get("title", "")
+            if DETAIL_WORDS.search(title):
+                return -1
+            if FLOWER_WORDS.search(title):
+                return 2
+            return 1
 
         def _get_info(titles: list[str]) -> list[dict]:
             """Fetch imageinfo + license metadata for a batch of file titles."""
@@ -404,6 +425,7 @@ def step3_wikimedia(latin_name: str) -> tuple:
                         meta.get("Credit", {}).get("value", "")
                     )).strip()[:80]
                     results.append({
+                        "title": title,
                         "url": ii["url"],
                         "thumb_url": ii.get("thumburl", ""),
                         "width": ii.get("width", 0),
@@ -411,7 +433,8 @@ def step3_wikimedia(latin_name: str) -> tuple:
                         "author": author,
                         "license": license_name,
                     })
-            results.sort(key=lambda x: x["width"] * x["height"], reverse=True)
+            # Sort: whole-plant photos first, detail shots last, then by resolution
+            results.sort(key=lambda x: (_score(x), x["width"] * x["height"]), reverse=True)
             return results
 
         import urllib.request as _urllib_req
@@ -537,41 +560,49 @@ def step4_process_images(
         import numpy as np
         from rembg import remove, new_session
 
-        # ── Image 1: home widget — remove bg, fit 492×492 PNG ─────────────
-        if img1_bytes:
-            print("  Image 1: removing background…")
+        # ── Home widget: try rembg on both photos, pick the best result ──────
+        def _try_rembg(raw: bytes, session) -> tuple:
+            """Returns (PIL image with bg removed, visible_pct). Falls back to original."""
+            bg_removed = remove(raw, session=session)
+            img = Image.open(io.BytesIO(bg_removed)).convert("RGBA")
+            alpha = np.array(img)[:, :, 3]
+            pct = (alpha > 10).sum() / alpha.size
+            if pct < 0.10:
+                img = Image.open(io.BytesIO(raw)).convert("RGBA")
+                pct = 1.0  # treat fallback as "full" so it won't win over a real removal
+            return img, pct
+
+        home_bytes = None
+        if img1_bytes or img2_bytes:
+            print("  Selecting best photo for home widget…")
             try:
                 session = new_session("isnet-general-use")
-                bg_removed = remove(img1_bytes, session=session)
-                img1 = Image.open(io.BytesIO(bg_removed)).convert("RGBA")
+                candidates_home = [(b, label) for b, label in [
+                    (img1_bytes, "photo 1"), (img2_bytes, "photo 2")
+                ] if b]
 
-                # Sanity check: if rembg wiped most of the flower, fall back
-                alpha = np.array(img1)[:, :, 3]
-                visible_pct = (alpha > 10).sum() / alpha.size
-                print(f"  BG removal: {visible_pct:.1%} pixels visible")
-                if visible_pct < 0.10:
-                    print(
-                        f"  [Warning] BG removal left only {visible_pct:.1%} visible "
-                        "— using original image"
-                    )
-                    img1 = Image.open(io.BytesIO(img1_bytes)).convert("RGBA")
+                best_img, best_pct, best_label = None, -1.0, ""
+                for raw, label in candidates_home:
+                    img_candidate, pct = _try_rembg(raw, session)
+                    print(f"  {label}: {pct:.1%} visible after BG removal")
+                    if pct > best_pct:
+                        best_img, best_pct, best_label = img_candidate, pct, label
 
-                # Crop to bounding box of visible pixels so the flower fills the frame
-                bbox = img1.getbbox()
-                if bbox:
-                    img1 = img1.crop(bbox)
+                print(f"  Using {best_label} for home.png")
+                home_bytes = img1_bytes if best_label == "photo 1" else img2_bytes
 
-                img1 = _resize_fit_transparent(img1, 492)
-                result["petal_color"] = extract_petal_color(img1)
+                best_img = _resize_fit_transparent(best_img, 492)
+                result["petal_color"] = extract_petal_color(best_img)
 
                 imageset = make_imageset(xcassets_root, slug)
                 fname = "home.png"
-                img1.save(str(imageset / fname), "PNG")
+                best_img.save(str(imageset / fname), "PNG")
                 write_contents_json(imageset, fname)
+                result["img1_bytes"] = home_bytes
                 result["img1_path"] = imageset / fname
                 print(f"  Saved: {imageset / fname}  petal colour: {result['petal_color']}")
             except Exception as e:
-                print(f"  [Warning] Image 1 processing failed: {e}")
+                print(f"  [Warning] Home image processing failed: {e}")
 
         # ── Image 2: info screen — keep bg, compress to <1 MB JPG ─────────
         if img2_bytes:
