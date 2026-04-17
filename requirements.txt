@@ -1,0 +1,27 @@
+# Flora Pipeline — Python dependencies
+# Tested with Python 3.11+
+# Install with:  pip install -r requirements.txt
+#
+# Note: rembg downloads a small ONNX model (~170 MB) on first run.
+# Set REMBG_HOME to choose where it is cached.
+
+# ── Environment ──────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+
+# ── Core HTTP & HTML ─────────────────────────────────────────────────────────
+httpx==0.28.1
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# ── Wikipedia data ───────────────────────────────────────────────────────────
+wikipedia-api==0.7.1
+
+# ── Image processing ─────────────────────────────────────────────────────────
+Pillow==10.4.0
+rembg==2.0.57
+onnxruntime==1.19.2
+numpy==1.26.4
+
+# ── Gemini image generation ──────────────────────────────────────────────────
+google-genai>=1.7.0
+
