@@ -262,6 +262,10 @@ def step2_pfaf(latin_name: str) -> list:
         soup = BeautifulSoup(resp.text, "html.parser")
         page_text = soup.get_text(" ", strip=True)
 
+        # Detect "plant not found" pages
+        if any(p in page_text for p in ["not found in the database", "No plant found", "search did not"]):
+            raise ValueError(f"'{latin_name}' not in PFAF database")
+
         care_info = []
 
         # ── hardiness ─────────────────────────────────────────────────────
@@ -324,6 +328,45 @@ def step2_pfaf(latin_name: str) -> list:
 
     except Exception as exc:
         print(f"  [Warning] PFAF scraping failed: {exc}")
+
+    # ── Gemini fallback ───────────────────────────────────────────────────────
+    print("  Asking Gemini for care info…")
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+        prompt = f"""Return care info for the plant "{latin_name}" as a JSON array.
+Use ONLY these exact values:
+
+Hardiness (pick one):
+  {{"icon":"snowflake","label":"Fully Hardy"}}
+  {{"icon":"snowflake","label":"Half Hardy"}}
+  {{"icon":"snowflake","label":"Frost Tender"}}
+
+Soil moisture (pick one):
+  {{"icon":"drop.fill","label":"Well Drained"}}
+  {{"icon":"drop.fill","label":"Moist Soil"}}
+  {{"icon":"drop.fill","label":"Dry Soil"}}
+
+Light (pick one or more):
+  {{"icon":"sun.max.fill","label":"Full Sun"}}
+  {{"icon":"cloud.sun.fill","label":"Part Shade"}}
+  {{"icon":"moon.fill","label":"Full Shade"}}
+
+Return ONLY a JSON array, no prose. Example:
+[{{"icon":"snowflake","label":"Fully Hardy"}},{{"icon":"drop.fill","label":"Well Drained"}},{{"icon":"sun.max.fill","label":"Full Sun"}}]"""
+
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        care_info = json.loads(resp.text.strip())
+        print(f"  Care info (Gemini): {care_info}")
+        return care_info
+    except Exception as e:
+        print(f"  [Warning] Gemini care info fallback failed: {e}")
         return [
             {"icon": "snowflake", "label": "Fully Hardy"},
             {"icon": "drop.fill", "label": "Well Drained"},
@@ -373,7 +416,10 @@ def step3_wikimedia(latin_name: str) -> tuple:
         # Words that suggest a detail/macro shot rather than the whole plant
         DETAIL_WORDS = re.compile(
             r"\bleaf\b|\bleaves\b|\bbranch\b|\bstem\b|\bdetail\b"
-            r"|\bmacro\b|\bclose.up\b|\bseed\b|\bfruit\b|\broot\b",
+            r"|\bmacro\b|\bclose.up\b|\bseed\b|\bfruit\b|\broot\b"
+            r"|\bheart\b|\bcenter\b|\bdisc\b|\bcone\b"
+            r"|\bbee\b|\bbees\b|\binsect\b|\bbutterfly\b|\bbug\b|\bpollen\b"
+            r"|\bwasp\b|\bhoverfly\b|\bfly\b|\bbeetle\b",
             re.IGNORECASE,
         )
 
@@ -399,7 +445,7 @@ def step3_wikimedia(latin_name: str) -> tuple:
                 "action": "query", "titles": "|".join(titles),
                 "prop": "imageinfo",
                 "iiprop": "url|extmetadata|mime|size|thumburl",
-                "iiurlwidth": "1200",
+                "iiurlwidth": "1500",
                 "format": "json",
             }, timeout=20)
             r.raise_for_status()
@@ -445,26 +491,35 @@ def step3_wikimedia(latin_name: str) -> tuple:
             "Chrome/124.0.0.0 Safari/537.36"
         )
 
-        def _download(item: dict) -> bytes | None:
-            urls = [u for u in [item["url"], item.get("thumb_url", "")] if u]
-            # De-duplicate while preserving order
-            seen = set()
-            urls = [u for u in urls if not (u in seen or seen.add(u))]
-            for url in urls:
-                try:
-                    req = _urllib_req.Request(
-                        url,
-                        headers={
-                            "User-Agent": _DL_UA,
-                            "Referer": "https://commons.wikimedia.org/",
-                            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                            "Accept-Language": "en-US,en;q=0.9",
-                        },
-                    )
-                    with _urllib_req.urlopen(req, timeout=40) as resp:
-                        return resp.read()
-                except Exception as e:
+        _dl_headers = {
+            "User-Agent": _DL_UA,
+            "Referer": "https://commons.wikimedia.org/",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        def _fetch_url(url: str) -> bytes | None:
+            """Single URL fetch — returns None on any error (including 429)."""
+            try:
+                req = _urllib_req.Request(url, headers=_dl_headers)
+                with _urllib_req.urlopen(req, timeout=40) as resp:
+                    return resp.read()
+            except Exception as e:
+                if "429" not in str(e):
                     print(f"  [Warning] Download failed ({url[:80]}): {e}")
+                return None
+
+        def _download(item: dict) -> bytes | None:
+            # Try thumb first (Wikimedia recommends it), fall back to direct URL
+            thumb = item.get("thumb_url", "")
+            direct = item["url"]
+            seen: set = set()
+            urls = [u for u in [thumb, direct] if u and not (u in seen or seen.add(u))]
+            for url in urls:
+                data = _fetch_url(url)
+                if data:
+                    return data
+            return None
             return None
 
         def _category_titles(category: str, limit: int = 30) -> list[str]:
@@ -494,11 +549,11 @@ def step3_wikimedia(latin_name: str) -> tuple:
             for item in batch:
                 if item not in candidates:
                     candidates.append(item)
-            if len(candidates) >= 2:
+            if len(candidates) >= 4:
                 break
 
         # Fallback: browse Commons category directly
-        if len(candidates) < 2:
+        if len(candidates) < 4:
             for cat in [latin_name, genus]:
                 cat_titles = _category_titles(cat, limit=40)
                 cat_titles = [t for t in cat_titles if re.search(r"\.(jpe?g|png)$", t, re.I)]
@@ -506,35 +561,93 @@ def step3_wikimedia(latin_name: str) -> tuple:
                 for item in batch:
                     if item not in candidates:
                         candidates.append(item)
-                if len(candidates) >= 2:
+                if len(candidates) >= 4:
                     break
 
         if not candidates:
             print("  [Warning] No free photos found on Wikimedia Commons")
             return None, None, ""
 
-        # Try candidates in order until we get 2 successful downloads
+        # Download up to 4 candidates for Gemini to judge
+        import time as _time
         downloaded = []
         for item in candidates:
             data = _download(item)
             if data:
                 downloaded.append((data, item))
-                if len(downloaded) == 2:
-                    break
+            if len(downloaded) == 4:
+                break
+            _time.sleep(1.0)  # avoid Wikimedia 429 between candidates
 
-        img1, img2, author = None, None, ""
-        if len(downloaded) >= 1:
-            img1, meta1 = downloaded[0]
-            author = meta1["author"]
-            print(f"  Image 1: {len(img1) // 1024} KB  license: {meta1['license']}  author: {author[:40]}")
-        if len(downloaded) >= 2:
-            img2, meta2 = downloaded[1]
-            print(f"  Image 2: {len(img2) // 1024} KB  license: {meta2['license']}")
-        elif len(downloaded) == 1:
-            print("  [Warning] Only one downloadable photo found — using it for both images")
-            img2 = img1
+        if not downloaded:
+            return None, None, ""
 
-        return img1, img2, author
+        for i, (data, meta) in enumerate(downloaded):
+            print(f"  Photo {i+1}: {len(data)//1024} KB  license: {meta['license']}  {meta.get('title','')[:55]}")
+
+        # ── Gemini judges which photo is best for the home widget ─────────
+        best_idx = 0
+        if len(downloaded) > 1:
+            try:
+                from google import genai
+                from google.genai import types as gtypes
+                import io as _io
+                from PIL import Image as _PILImage
+
+                api_key = os.environ.get("GEMINI_API_KEY", "")
+                gclient = genai.Client(api_key=api_key)
+
+                def _thumb(raw: bytes) -> bytes:
+                    img = _PILImage.open(_io.BytesIO(raw)).convert("RGB")
+                    img.thumbnail((800, 800), _PILImage.LANCZOS)
+                    buf = _io.BytesIO()
+                    img.save(buf, "JPEG", quality=75)
+                    return buf.getvalue()
+
+                parts = []
+                for i, (raw, _) in enumerate(downloaded):
+                    parts.append(f"Photo {i+1}:")
+                    parts.append(gtypes.Part.from_bytes(data=_thumb(raw), mime_type="image/jpeg"))
+
+                parts.append(
+                    f"You are selecting the best photo for a flower widget in an iOS app.\n"
+                    f"The flower is: {latin_name}.\n\n"
+                    f"CHOOSE the photo that best meets ALL of these criteria:\n"
+                    f"- The PETALS of the flower are clearly visible and fill most of the frame\n"
+                    f"- Simple or blurred background (easy to remove)\n"
+                    f"- Close-up or portrait shot of the flower head\n\n"
+                    f"REJECT any photo that:\n"
+                    f"- Has ANY insect (bee, butterfly, fly, bug, beetle) visible — even partially\n"
+                    f"- Shows mainly the seed head, disc center, or stem with no petals\n"
+                    f"- Is a wide landscape or habitat shot where the flower is small\n"
+                    f"- Shows only leaves, buds, or an unopened flower\n"
+                    f"If ALL photos have insects or no petals, pick the one where the flower is most visible despite the issue.\n\n"
+                    f"Reply with ONLY a single digit: the number of the best photo "
+                    f"(1 through {len(downloaded)})."
+                )
+
+                resp = gclient.models.generate_content(
+                    model="gemini-2.5-flash-lite",
+                    contents=parts,
+                    config=gtypes.GenerateContentConfig(response_mime_type="text/plain"),
+                )
+                digit = re.search(r"[1-4]", resp.text.strip())
+                if digit:
+                    best_idx = min(int(digit.group()) - 1, len(downloaded) - 1)
+                    print(f"  Gemini chose photo {best_idx+1} for home widget")
+                else:
+                    print(f"  [Warning] Unexpected Gemini answer '{resp.text.strip()}' — using photo 1")
+            except Exception as e:
+                print(f"  [Warning] Gemini judge failed: {e} — using photo 1")
+
+        # Return all candidates sorted: Gemini's choice first, rest after
+        author = downloaded[best_idx][1]["author"]
+        ordered = [downloaded[best_idx]] + [d for i, d in enumerate(downloaded) if i != best_idx]
+        all_bytes = [d[0] for d in ordered]
+        info_bytes = ordered[1][0] if len(ordered) > 1 else ordered[0][0]
+        print(f"  Gemini chose photo {best_idx+1} for home widget")
+
+        return all_bytes, info_bytes, author
 
     except Exception as exc:
         print(f"  [Warning] Wikimedia step failed: {exc}")
@@ -545,62 +658,74 @@ def step3_wikimedia(latin_name: str) -> tuple:
 # Process real photos: home.png (bg removed) + info.jpg (compressed)
 
 def step4_process_images(
-    img1_bytes, img2_bytes, xcassets_root: Path, slug: str
+    home_candidates,   # list[bytes] — Gemini's pick first, fallbacks after
+    img2_bytes,
+    xcassets_root: Path,
+    slug: str,
 ) -> dict:
     print("\n[Step 4] Processing images…")
+    # Normalise: accept both a single bytes object and a list
+    if isinstance(home_candidates, (bytes, type(None))):
+        home_candidates = [home_candidates] if home_candidates else []
+
     result = {
-        "img1_bytes": img1_bytes,   # passed through to step 5 as Gemini reference
+        "img1_bytes": home_candidates[0] if home_candidates else None,
         "img1_path": None,
         "img2_path": None,
         "petal_color": "#F0EBD8",
     }
 
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
         import numpy as np
         from rembg import remove, new_session
 
-        # ── Home widget: try rembg on both photos, pick the best result ──────
-        def _try_rembg(raw: bytes, session) -> tuple:
-            """Returns (PIL image with bg removed, visible_pct). Falls back to original."""
-            bg_removed = remove(raw, session=session)
-            img = Image.open(io.BytesIO(bg_removed)).convert("RGBA")
-            alpha = np.array(img)[:, :, 3]
-            pct = (alpha > 10).sum() / alpha.size
-            if pct < 0.10:
-                img = Image.open(io.BytesIO(raw)).convert("RGBA")
-                pct = 1.0  # treat fallback as "full" so it won't win over a real removal
-            return img, pct
+        def _is_bad(img_rgba, visible_pct: float) -> bool:
+            if visible_pct < 0.10:
+                return True
+            color = extract_petal_color(_resize_fit_transparent(img_rgba.copy(), 200))
+            r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+            return (r + g + b) / 3 < 60 and max(r, g, b) - min(r, g, b) < 40
 
-        home_bytes = None
-        if img1_bytes or img2_bytes:
-            print("  Selecting best photo for home widget…")
+        # ── Home widget: try each candidate until rembg gives a clean result ──
+        if home_candidates:
+            print("  Home: removing background…")
             try:
-                session = new_session("isnet-general-use")
-                candidates_home = [(b, label) for b, label in [
-                    (img1_bytes, "photo 1"), (img2_bytes, "photo 2")
-                ] if b]
+                session = new_session("birefnet-general")
+                chosen_img = None
 
-                best_img, best_pct, best_label = None, -1.0, ""
-                for raw, label in candidates_home:
-                    img_candidate, pct = _try_rembg(raw, session)
-                    print(f"  {label}: {pct:.1%} visible after BG removal")
-                    if pct > best_pct:
-                        best_img, best_pct, best_label = img_candidate, pct, label
+                for i, raw_bytes in enumerate(home_candidates):
+                    raw_img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw_bytes)))
+                    buf = io.BytesIO()
+                    raw_img.save(buf, format="JPEG")
+                    corrected = buf.getvalue()
 
-                print(f"  Using {best_label} for home.png")
-                home_bytes = img1_bytes if best_label == "photo 1" else img2_bytes
+                    bg_removed = remove(corrected, session=session)
+                    img_rgba = Image.open(io.BytesIO(bg_removed)).convert("RGBA")
 
-                best_img = _resize_fit_transparent(best_img, 492)
-                result["petal_color"] = extract_petal_color(best_img)
+                    alpha = np.array(img_rgba)[:, :, 3]
+                    visible_pct = (alpha > 10).sum() / alpha.size
+                    bad = _is_bad(img_rgba, visible_pct)
+                    label = "Gemini pick" if i == 0 else f"fallback {i}"
+                    print(f"  [{label}] visible={visible_pct:.1%}  {'BAD' if bad else 'OK'}")
 
-                imageset = make_imageset(xcassets_root, slug)
-                fname = "home.png"
-                best_img.save(str(imageset / fname), "PNG")
-                write_contents_json(imageset, fname)
-                result["img1_bytes"] = home_bytes
-                result["img1_path"] = imageset / fname
-                print(f"  Saved: {imageset / fname}  petal colour: {result['petal_color']}")
+                    if not bad:
+                        chosen_img = img_rgba
+                        result["img1_bytes"] = raw_bytes
+                        break
+
+                if chosen_img is None:
+                    print("  No usable home image found — flower will be skipped")
+
+                if chosen_img is not None:
+                    chosen_img = _resize_fit_transparent(chosen_img, 492)
+                    result["petal_color"] = extract_petal_color(chosen_img)
+                    imageset = make_imageset(xcassets_root, slug)
+                    fname = "home.png"
+                    chosen_img.save(str(imageset / fname), "PNG")
+                    write_contents_json(imageset, fname)
+                    result["img1_path"] = imageset / fname
+                    print(f"  Saved: {imageset / fname}  petal colour: {result['petal_color']}")
             except Exception as e:
                 print(f"  [Warning] Home image processing failed: {e}")
 
@@ -608,7 +733,8 @@ def step4_process_images(
         if img2_bytes:
             print("  Image 2: compressing for info screen…")
             try:
-                img2 = Image.open(io.BytesIO(img2_bytes)).convert("RGB")
+                from PIL import ImageOps
+                img2 = ImageOps.exif_transpose(Image.open(io.BytesIO(img2_bytes))).convert("RGB")
                 imageset = make_imageset(xcassets_root, f"{slug}-info")
                 fname = "info.jpg"
 
@@ -702,10 +828,27 @@ def step5_gemini_lock(
         # which gives much cleaner transparency than rembg.
         img_lock = Image.open(io.BytesIO(generated_bytes)).convert("RGBA")
         import numpy as np
-        arr = np.array(img_lock)
-        # Mark near-white pixels as fully transparent
-        white_mask = (arr[:, :, 0] > 240) & (arr[:, :, 1] > 240) & (arr[:, :, 2] > 240)
-        arr[white_mask, 3] = 0
+        arr = np.array(img_lock, dtype=np.uint8)
+
+        # Pass 1: hard threshold — obvious white pixels
+        white = (arr[:, :, 0] > 240) & (arr[:, :, 1] > 240) & (arr[:, :, 2] > 240)
+        arr[white, 3] = 0
+
+        # Pass 2: propagate transparency to near-white neighbours (cleans fringe)
+        # Any pixel R>220,G>220,B>220 that touches a transparent pixel gets removed.
+        near_white = (arr[:, :, 0] > 220) & (arr[:, :, 1] > 220) & (arr[:, :, 2] > 220)
+        for _ in range(6):
+            transparent = arr[:, :, 3] == 0
+            adj = (
+                np.roll(transparent, 1, axis=0) | np.roll(transparent, -1, axis=0) |
+                np.roll(transparent, 1, axis=1) | np.roll(transparent, -1, axis=1)
+            )
+            spill = near_white & adj
+            if not spill.any():
+                break
+            arr[spill, 3] = 0
+            near_white[spill] = False
+
         img_lock = Image.fromarray(arr)
 
         # Crop to visible content, then fit in 200×200
@@ -949,10 +1092,21 @@ def main() -> None:
     care_info = step2_pfaf(latin_name)
 
     # ── Step 3: Wikimedia Commons CC0/PD photos ──────────────────────────
-    img1_bytes, img2_bytes, observer = step3_wikimedia(latin_name)
+    # home_candidates = list[bytes] ordered by Gemini preference; img2_bytes = info photo
+    home_candidates, img2_bytes, observer = step3_wikimedia(latin_name)
 
     # ── Step 4: Process images ────────────────────────────────────────────
-    processed = step4_process_images(img1_bytes, img2_bytes, xcassets_root, slug)
+    processed = step4_process_images(home_candidates, img2_bytes, xcassets_root, slug)
+
+    # Abort if no usable home.png — clean up and exit
+    if not processed.get("img1_path"):
+        import shutil
+        print(f"\n✗ Skipping '{latin_name}' — could not generate a clean home.png.")
+        print("  Cleaning up partial files…")
+        for folder in xcassets_root.glob(f"{slug}*"):
+            shutil.rmtree(folder)
+            print(f"  Removed: {folder.name}")
+        sys.exit(0)
 
     # ── Step 5: Gemini — lock.png only ──────────────────────────────────
     step5_gemini_lock(

@@ -20,7 +20,7 @@ The pipeline runs 7 steps end-to-end:
 |------|-------------|
 | **1 — Wikipedia** | Fetches the common name, description, habitat, etymology, and cultural info |
 | **2 — Care info** | Scrapes PFAF for hardiness, soil, and light requirements |
-| **3 — Photos** | Finds and downloads 2 CC-licensed photos from Wikimedia Commons |
+| **3 — Photos** | Fetches up to 4 CC-licensed candidates from Wikimedia Commons; Gemini picks the best one for the home widget |
 | **4 — Image processing** | Background removal on `home.png` (rembg), compression for `info.jpg` |
 | **5 — Lock screen** | Generates a monochromatic botanical icon via Gemini (linocut style) |
 | **6 — Content & translations** | Enhances English copy and translates everything into DE, FR, ES, IT, ZH, JA via Gemini |
