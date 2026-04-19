@@ -699,14 +699,15 @@ def step4_process_images(
                             _gtypes.Part.from_bytes(
                                 data=buf.getvalue(), mime_type="image/jpeg"
                             ),
-                            "This is a flower photo. Your task: remove the background completely "
-                            "and place the flower on a solid pure white (#FFFFFF) background. "
-                            "Keep ONLY the single most central flower with ALL its petals fully intact — "
-                            "do not cut, crop, or remove any petal. "
-                            "Remove everything else: background, grass, leaves, stems, soil, other flowers, "
-                            "insects, and any other element that is not the main flower head. "
-                            "The background must be completely white — no gradients, no shadows, nothing. "
-                            "Result: one flower, white background, nothing else.",
+                            "Remove the background from this flower photo. "
+                            "Output the single main flower isolated on a solid pure white (#FFFFFF) background. "
+                            "CRITICAL RULES: "
+                            "1. Do NOT convert anything to black and white or grayscale — keep all flower colors exactly as they are. "
+                            "2. The background must be pure white (#FFFFFF) — not grey, not transparent, not desaturated. "
+                            "3. Keep ALL petals of the flower complete and intact — do not cut or remove any part of the flower. "
+                            "4. Remove everything that is not the main flower head: background, grass, leaves, stems, soil, insects, other flowers. "
+                            "5. If the flower center is white or light-colored, preserve that — do not remove it. "
+                            "Result: one flower in full color, pure white background, nothing else.",
                         ],
                         config=_gtypes.GenerateContentConfig(
                             response_modalities=["IMAGE", "TEXT"]
@@ -720,11 +721,12 @@ def step4_process_images(
                                 raw = _b64.b64decode(raw)
                             img = Image.open(io.BytesIO(raw)).convert("RGBA")
                             arr = np.array(img, dtype=np.uint8)
-                            # Remove white background + fringe propagation
-                            white = (arr[:,:,0] > 230) & (arr[:,:,1] > 230) & (arr[:,:,2] > 230)
+                            # Remove white background — strict threshold to avoid eating flower centers
+                            white = (arr[:,:,0] > 245) & (arr[:,:,1] > 245) & (arr[:,:,2] > 245)
                             arr[white, 3] = 0
-                            near = (arr[:,:,0] > 200) & (arr[:,:,1] > 200) & (arr[:,:,2] > 200)
-                            for _ in range(8):
+                            # Propagate only 3 passes at a conservative threshold
+                            near = (arr[:,:,0] > 238) & (arr[:,:,1] > 238) & (arr[:,:,2] > 238)
+                            for _ in range(3):
                                 transp = arr[:,:,3] == 0
                                 adj = (
                                     np.roll(transp, 1, 0) | np.roll(transp, -1, 0) |
@@ -838,10 +840,12 @@ def step5_gemini_lock(
             f"Flat botanical icon of a {common_name} ({latin_name}). "
             "Composition: one large flower head prominently at the top-center, "
             "a single straight stem, and 2–3 simple leaves below. "
-            "The entire illustration — flower, petals, stem, leaves — is filled "
-            "with one single solid color. White background. "
-            "No gradients, no shading, no outlines, no second color anywhere. "
-            "Bold graphic style like a linocut stamp or app icon. "
+            "CRITICAL: use EXACTLY ONE single solid color for the ENTIRE illustration — "
+            "every petal, every leaf, the stem, the flower center, everything. "
+            "NO white, NO second color, NO outlines in a different color, NO highlights, NO gradients. "
+            "If you choose orange, every single part of the drawing must be that exact orange — nothing else. "
+            "The background is plain white. The illustration uses one color only. "
+            "Bold graphic style like a linocut stamp: flat filled shapes with cut-out negative space to show detail. "
             "The flower must be clearly recognizable and fill most of the frame."
         )
 
@@ -897,6 +901,17 @@ def step5_gemini_lock(
                 break
             arr[spill, 3] = 0
             near_white[spill] = False
+
+        # Pass 3: keep only the dominant color — removes white specks and secondary colors
+        visible = arr[:, :, 3] > 0
+        if visible.any():
+            pixels = arr[visible][:, :3].astype(np.float32)
+            dominant = np.median(pixels, axis=0)  # median is robust to outliers
+            dist = np.sqrt(((arr[:, :, :3].astype(np.float32) - dominant) ** 2).sum(axis=2))
+            # Pixels too far from dominant color → transparent
+            arr[visible & (dist > 80), 3] = 0
+            dr, dg, db = int(dominant[0]), int(dominant[1]), int(dominant[2])
+            print(f"  Lock dominant color: #{dr:02X}{dg:02X}{db:02X}")
 
         img_lock = Image.fromarray(arr)
 
