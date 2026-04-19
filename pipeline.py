@@ -678,7 +678,6 @@ def step4_process_images(
     try:
         from PIL import Image, ImageOps
         import numpy as np
-        from rembg import remove, new_session
 
         def _is_bad(img_rgba, visible_pct: float) -> bool:
             if visible_pct < 0.10:
@@ -687,26 +686,86 @@ def step4_process_images(
             r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
             return (r + g + b) / 3 < 60 and max(r, g, b) - min(r, g, b) < 40
 
-        # ── Home widget: try each candidate until rembg gives a clean result ──
+        # ── Home widget: Gemini removes background directly from original photo ──
         if home_candidates:
-            print("  Home: removing background…")
+            print("  Home: removing background via Gemini…")
             try:
-                session = new_session("birefnet-general")
+                from google import genai as _genai
+                from google.genai import types as _gtypes
+
+                _api_key = os.environ.get("GEMINI_API_KEY", "")
+                _gc = _genai.Client(api_key=_api_key)
                 chosen_img = None
 
-                for i, raw_bytes in enumerate(home_candidates):
-                    raw_img = ImageOps.exif_transpose(Image.open(io.BytesIO(raw_bytes)))
+                def _gemini_remove_bg(raw_bytes: bytes) -> "Image":
+                    """Send original photo to Gemini, get flower on white bg, make transparent."""
+                    raw_img = ImageOps.exif_transpose(
+                        Image.open(io.BytesIO(raw_bytes))
+                    ).convert("RGB")
                     buf = io.BytesIO()
-                    raw_img.save(buf, format="JPEG")
-                    corrected = buf.getvalue()
+                    raw_img.thumbnail((1024, 1024), Image.LANCZOS)
+                    raw_img.save(buf, "JPEG", quality=88)
 
-                    bg_removed = remove(corrected, session=session)
-                    img_rgba = Image.open(io.BytesIO(bg_removed)).convert("RGBA")
+                    resp = _gc.models.generate_content(
+                        model="gemini-2.5-flash-image",
+                        contents=[
+                            _gtypes.Part.from_bytes(
+                                data=buf.getvalue(), mime_type="image/jpeg"
+                            ),
+                            "This is a flower photo. Your task: remove the background completely "
+                            "and place the flower on a solid pure white (#FFFFFF) background. "
+                            "Keep ONLY the single most central flower with ALL its petals fully intact — "
+                            "do not cut, crop, or remove any petal. "
+                            "Remove everything else: background, grass, leaves, stems, soil, other flowers, "
+                            "insects, and any other element that is not the main flower head. "
+                            "The background must be completely white — no gradients, no shadows, nothing. "
+                            "Result: one flower, white background, nothing else.",
+                        ],
+                        config=_gtypes.GenerateContentConfig(
+                            response_modalities=["IMAGE", "TEXT"]
+                        ),
+                    )
+                    for part in resp.candidates[0].content.parts:
+                        if hasattr(part, "inline_data") and part.inline_data:
+                            raw = part.inline_data.data
+                            if isinstance(raw, str):
+                                import base64 as _b64
+                                raw = _b64.b64decode(raw)
+                            img = Image.open(io.BytesIO(raw)).convert("RGBA")
+                            arr = np.array(img, dtype=np.uint8)
+                            # Remove white background + fringe propagation
+                            white = (arr[:,:,0] > 230) & (arr[:,:,1] > 230) & (arr[:,:,2] > 230)
+                            arr[white, 3] = 0
+                            near = (arr[:,:,0] > 200) & (arr[:,:,1] > 200) & (arr[:,:,2] > 200)
+                            for _ in range(8):
+                                transp = arr[:,:,3] == 0
+                                adj = (
+                                    np.roll(transp, 1, 0) | np.roll(transp, -1, 0) |
+                                    np.roll(transp, 1, 1) | np.roll(transp, -1, 1)
+                                )
+                                spill = near & adj
+                                if not spill.any():
+                                    break
+                                arr[spill, 3] = 0
+                                near[spill] = False
+                            return Image.fromarray(arr)
+                    return None
+
+                for i, raw_bytes in enumerate(home_candidates):
+                    label = "Gemini pick" if i == 0 else f"fallback {i}"
+                    try:
+                        img_rgba = _gemini_remove_bg(raw_bytes)
+                    except Exception as _ge:
+                        print(f"  [{label}] Gemini bg removal failed: {_ge}")
+                        img_rgba = None
+
+                    if img_rgba is None:
+                        print(f"  [{label}] no image returned — skipping candidate")
+                        continue
 
                     alpha = np.array(img_rgba)[:, :, 3]
                     visible_pct = (alpha > 10).sum() / alpha.size
                     bad = _is_bad(img_rgba, visible_pct)
-                    label = "Gemini pick" if i == 0 else f"fallback {i}"
                     print(f"  [{label}] visible={visible_pct:.1%}  {'BAD' if bad else 'OK'}")
 
                     if not bad:
@@ -718,6 +777,9 @@ def step4_process_images(
                     print("  No usable home image found — flower will be skipped")
 
                 if chosen_img is not None:
+                    bbox = chosen_img.getbbox()
+                    if bbox:
+                        chosen_img = chosen_img.crop(bbox)
                     chosen_img = _resize_fit_transparent(chosen_img, 492)
                     result["petal_color"] = extract_petal_color(chosen_img)
                     imageset = make_imageset(xcassets_root, slug)

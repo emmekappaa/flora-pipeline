@@ -21,7 +21,7 @@ The pipeline runs 7 steps end-to-end:
 | **1 — Wikipedia** | Fetches the common name, description, habitat, etymology, and cultural info |
 | **2 — Care info** | Scrapes PFAF for hardiness, soil, and light requirements |
 | **3 — Photos** | Fetches up to 4 CC-licensed candidates from Wikimedia Commons; Gemini picks the best one for the home widget |
-| **4 — Image processing** | Background removal on `home.png` (rembg), compression for `info.jpg` |
+| **4 — Image processing** | Background removal on `home.png` via Gemini (flower isolated on transparent bg), compression for `info.jpg` |
 | **5 — Lock screen** | Generates a monochromatic botanical icon via Gemini (linocut style) |
 | **6 — Content & translations** | Enhances English copy and translates everything into DE, FR, ES, IT, ZH, JA via Gemini |
 | **7 — Dataset** | Upserts the flower into `flowers.dataset/flowers.json`, ready for Xcode |
@@ -54,7 +54,7 @@ Create a `.env` file in the same folder:
 GEMINI_API_KEY=your_key_here
 ```
 
-Get your key from [Google AI Studio](https://aistudio.google.com/apikey) — free tier is enough.
+Get your key from [Google AI Studio](https://aistudio.google.com/apikey).
 
 ## Utilities
 
