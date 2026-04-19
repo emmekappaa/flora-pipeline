@@ -270,25 +270,23 @@ def step2_pfaf(latin_name: str) -> list:
         img_alts = {img.get("alt", "").strip() for img in soup.find_all("img") if img.get("alt")}
 
         # Hardiness mapping (PFAF label → our label)
+        # Keys = PFAF img alt text, values = app label (from LanguageManager.swift)
         HARDINESS_MAP = {
-            "Fully Hardy":  "Fully Hardy",
-            "Frost Hardy":  "Half Hardy",   # -5°C, closest to our Half Hardy
-            "Half Hardy":   "Half Hardy",
-            "Tender":       "Frost Tender",
+            "Fully Hardy": "Fully Hardy",
+            "Frost Hardy": "Frost Hardy",
+            "Half Hardy":  "Half Hardy",
+            "Tender":      "Half Hardy",    # not in app — closest match
         }
-        # Moisture mapping (label = exact PFAF string)
         MOISTURE_MAP = {
-            "Well drained soil": "Well drained soil",
+            "Well drained soil": "Well Drained Soil",
             "Moist Soil":        "Moist Soil",
             "Wet Soil":          "Wet Soil",
             "Water Plants":      "Water Plants",
         }
-        # Light mapping (label = exact PFAF string)
         LIGHT_MAP = {
-            "Full sun":   ("sun.max.fill",   "Full sun"),
-            "Semi-shade": ("cloud.sun.fill", "Semi-shade"),
-            "Full shade": ("moon.fill",      "Full shade"),
-            "No shade":   ("sun.max.fill",   "Full sun"),
+            "Full sun":   ("sun.max.fill",   "Full Sun"),
+            "Semi-shade": ("cloud.sun.fill", "Part Shade"),
+            "Full shade": ("moon.fill",      "Full Shade"),
         }
 
         care_info = []
@@ -328,21 +326,23 @@ Use ONLY these exact values (labels must match exactly, including capitalisation
 
 Hardiness (pick one):
   {{"icon":"snowflake","label":"Fully Hardy"}}
+  {{"icon":"snowflake","label":"Frost Hardy"}}
   {{"icon":"snowflake","label":"Half Hardy"}}
-  {{"icon":"snowflake","label":"Frost Tender"}}
+  {{"icon":"snowflake","label":"Tender"}}
 
 Soil moisture (pick one or more):
-  {{"icon":"drop.fill","label":"Well drained soil"}}
+  {{"icon":"drop.fill","label":"Well Drained Soil"}}
   {{"icon":"drop.fill","label":"Moist Soil"}}
   {{"icon":"drop.fill","label":"Wet Soil"}}
+  {{"icon":"drop.fill","label":"Water Plants"}}
 
 Light (pick one or more):
-  {{"icon":"sun.max.fill","label":"Full sun"}}
-  {{"icon":"cloud.sun.fill","label":"Semi-shade"}}
-  {{"icon":"moon.fill","label":"Full shade"}}
+  {{"icon":"sun.max.fill","label":"Full Sun"}}
+  {{"icon":"cloud.sun.fill","label":"Part Shade"}}
+  {{"icon":"moon.fill","label":"Full Shade"}}
 
 Return ONLY a JSON array, no prose. Example:
-[{{"icon":"snowflake","label":"Fully Hardy"}},{{"icon":"drop.fill","label":"Well drained soil"}},{{"icon":"sun.max.fill","label":"Full sun"}}]"""
+[{{"icon":"snowflake","label":"Fully Hardy"}},{{"icon":"drop.fill","label":"Well Drained Soil"}},{{"icon":"sun.max.fill","label":"Full Sun"}}]"""
 
         resp = client.models.generate_content(
             model="gemini-2.5-flash-lite",
@@ -356,8 +356,8 @@ Return ONLY a JSON array, no prose. Example:
         print(f"  [Warning] Gemini care info fallback failed: {e}")
         return [
             {"icon": "snowflake", "label": "Fully Hardy"},
-            {"icon": "drop.fill", "label": "Well drained soil"},
-            {"icon": "sun.max.fill", "label": "Full sun"},
+            {"icon": "drop.fill", "label": "Well Drained Soil"},
+            {"icon": "sun.max.fill", "label": "Full Sun"},
         ]
 
 
