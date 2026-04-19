@@ -628,13 +628,14 @@ def step3_wikimedia(latin_name: str) -> tuple:
                 print(f"  [Warning] Gemini judge failed: {e} — using photo 1")
 
         # Return all candidates sorted: Gemini's choice first, rest after
-        author = downloaded[best_idx][1]["author"]
         ordered = [downloaded[best_idx]] + [d for i, d in enumerate(downloaded) if i != best_idx]
         all_bytes = [d[0] for d in ordered]
         info_bytes = ordered[1][0] if len(ordered) > 1 else ordered[0][0]
+        # Author credit belongs to the info photo, not the home photo
+        info_author = ordered[1][1]["author"] if len(ordered) > 1 else ordered[0][1]["author"]
         print(f"  Gemini chose photo {best_idx+1} for home widget")
 
-        return all_bytes, info_bytes, author
+        return all_bytes, info_bytes, info_author
 
     except Exception as exc:
         print(f"  [Warning] Wikimedia step failed: {exc}")
@@ -721,22 +722,38 @@ def step4_process_images(
                                 raw = _b64.b64decode(raw)
                             img = Image.open(io.BytesIO(raw)).convert("RGBA")
                             arr = np.array(img, dtype=np.uint8)
-                            # Remove white background — strict threshold to avoid eating flower centers
-                            white = (arr[:,:,0] > 245) & (arr[:,:,1] > 245) & (arr[:,:,2] > 245)
-                            arr[white, 3] = 0
-                            # Propagate only 3 passes at a conservative threshold
-                            near = (arr[:,:,0] > 238) & (arr[:,:,1] > 238) & (arr[:,:,2] > 238)
-                            for _ in range(3):
-                                transp = arr[:,:,3] == 0
-                                adj = (
-                                    np.roll(transp, 1, 0) | np.roll(transp, -1, 0) |
-                                    np.roll(transp, 1, 1) | np.roll(transp, -1, 1)
+                            h_px, w_px = arr.shape[:2]
+                            # Detect background color from entire image border
+                            border_px = np.concatenate([
+                                arr[0, :, :3], arr[-1, :, :3],
+                                arr[:, 0, :3], arr[:, -1, :3],
+                            ]).astype(np.float32)
+                            bg_color = np.median(border_px, axis=0)
+                            # If background is dark/colorful, Gemini didn't process it — signal failure
+                            if bg_color.mean() < 150:
+                                return None
+                            dist_from_bg = np.sqrt(
+                                ((arr[:, :, :3].astype(np.float32) - bg_color) ** 2).sum(axis=2)
+                            )
+                            # Pixels eligible for removal: within ±40 of detected bg color
+                            near_bg = dist_from_bg < 40
+                            # Border-connected flood fill: only remove pixels reachable from
+                            # the image border, so isolated flower centers are never touched
+                            reachable = np.zeros((h_px, w_px), dtype=bool)
+                            reachable[0, :]  = near_bg[0, :]
+                            reachable[-1, :] = near_bg[-1, :]
+                            reachable[:, 0]  = near_bg[:, 0]
+                            reachable[:, -1] = near_bg[:, -1]
+                            for _ in range(max(h_px, w_px)):
+                                expanded = (
+                                    np.roll(reachable, 1, 0) | np.roll(reachable, -1, 0) |
+                                    np.roll(reachable, 1, 1) | np.roll(reachable, -1, 1)
                                 )
-                                spill = near & adj
-                                if not spill.any():
+                                new = near_bg & expanded & ~reachable
+                                if not new.any():
                                     break
-                                arr[spill, 3] = 0
-                                near[spill] = False
+                                reachable |= new
+                            arr[reachable, 3] = 0
                             return Image.fromarray(arr)
                     return None
 
