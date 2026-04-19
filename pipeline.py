@@ -266,62 +266,49 @@ def step2_pfaf(latin_name: str) -> list:
         if any(p in page_text for p in ["not found in the database", "No plant found", "search did not"]):
             raise ValueError(f"'{latin_name}' not in PFAF database")
 
+        # ── Read care icons directly from <img alt="..."> — the exact PFAF labels ──
+        img_alts = {img.get("alt", "").strip() for img in soup.find_all("img") if img.get("alt")}
+
+        # Hardiness mapping (PFAF label → our label)
+        HARDINESS_MAP = {
+            "Fully Hardy":  "Fully Hardy",
+            "Frost Hardy":  "Half Hardy",   # -5°C, closest to our Half Hardy
+            "Half Hardy":   "Half Hardy",
+            "Tender":       "Frost Tender",
+        }
+        # Moisture mapping (label = exact PFAF string)
+        MOISTURE_MAP = {
+            "Well drained soil": "Well drained soil",
+            "Moist Soil":        "Moist Soil",
+            "Wet Soil":          "Wet Soil",
+            "Water Plants":      "Water Plants",
+        }
+        # Light mapping (label = exact PFAF string)
+        LIGHT_MAP = {
+            "Full sun":   ("sun.max.fill",   "Full sun"),
+            "Semi-shade": ("cloud.sun.fill", "Semi-shade"),
+            "Full shade": ("moon.fill",      "Full shade"),
+            "No shade":   ("sun.max.fill",   "Full sun"),
+        }
+
         care_info = []
+        for alt, label in HARDINESS_MAP.items():
+            if alt in img_alts:
+                care_info.append({"icon": "snowflake", "label": label})
+                break
+        for alt, label in MOISTURE_MAP.items():
+            if alt in img_alts:
+                care_info.append({"icon": "drop.fill", "label": label})
+        for alt, (icon, label) in LIGHT_MAP.items():
+            if alt in img_alts:
+                care_info.append({"icon": icon, "label": label})
 
-        # ── hardiness ─────────────────────────────────────────────────────
-        hardiness_label = "Fully Hardy"
-        zone_match = re.search(
-            r"(?:usda\s+)?hardiness[:\s]+(\d+)\s*[-–to]+\s*(\d+)",
-            page_text,
-            re.IGNORECASE,
-        )
-        if zone_match:
-            min_zone = int(zone_match.group(1))
-            if min_zone <= 6:
-                hardiness_label = "Fully Hardy"
-            elif min_zone <= 9:
-                hardiness_label = "Half Hardy"
-            else:
-                hardiness_label = "Frost Tender"
-        else:
-            pt_lower = page_text.lower()
-            if "frost tender" in pt_lower or "tender" in pt_lower:
-                hardiness_label = "Frost Tender"
-            elif "half hardy" in pt_lower:
-                hardiness_label = "Half Hardy"
-            else:
-                hardiness_label = "Fully Hardy"
+        # Deduplicate (same label from multiple alts)
+        seen: set = set()
+        care_info = [e for e in care_info if not (e["label"] in seen or seen.add(e["label"]))]
 
-        care_info.append({"icon": "snowflake", "label": hardiness_label})
-
-        # ── soil moisture ──────────────────────────────────────────────────
-        moisture_label = "Well Drained"
-        pt_lower = page_text.lower()
-        if re.search(r"\bmoist\b(?!\s*well)", pt_lower):
-            moisture_label = "Moist Soil"
-        elif re.search(r"\bwell.drained\b|\bwell\s+drained\b", pt_lower):
-            moisture_label = "Well Drained"
-        elif re.search(r"\bdry\b", pt_lower):
-            moisture_label = "Dry Soil"
-
-        care_info.append({"icon": "drop.fill", "label": moisture_label})
-
-        # ── light requirements ─────────────────────────────────────────────
-        shade_entries = []
-        if re.search(r"\bfull\s+sun\b|\bno\s+shade\b", pt_lower):
-            shade_entries.append({"icon": "sun.max.fill", "label": "Full Sun"})
-        if re.search(
-            r"\bsemi.shade\b|\bpart(?:ial)?\s+shade\b|\blight\s+shade\b|\bdappled\b",
-            pt_lower,
-        ):
-            shade_entries.append({"icon": "cloud.sun.fill", "label": "Part Shade"})
-        if re.search(r"\bfull\s+shade\b|\bdeep\s+shade\b", pt_lower):
-            shade_entries.append({"icon": "moon.fill", "label": "Full Shade"})
-
-        if not shade_entries:
-            shade_entries = [{"icon": "sun.max.fill", "label": "Full Sun"}]
-
-        care_info.extend(shade_entries)
+        if not care_info:
+            raise ValueError("No care icons found in PFAF page imgs")
 
         print(f"  Care info: {care_info}")
         return care_info
@@ -337,25 +324,25 @@ def step2_pfaf(latin_name: str) -> list:
 
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
         prompt = f"""Return care info for the plant "{latin_name}" as a JSON array.
-Use ONLY these exact values:
+Use ONLY these exact values (labels must match exactly, including capitalisation):
 
 Hardiness (pick one):
   {{"icon":"snowflake","label":"Fully Hardy"}}
   {{"icon":"snowflake","label":"Half Hardy"}}
   {{"icon":"snowflake","label":"Frost Tender"}}
 
-Soil moisture (pick one):
-  {{"icon":"drop.fill","label":"Well Drained"}}
+Soil moisture (pick one or more):
+  {{"icon":"drop.fill","label":"Well drained soil"}}
   {{"icon":"drop.fill","label":"Moist Soil"}}
-  {{"icon":"drop.fill","label":"Dry Soil"}}
+  {{"icon":"drop.fill","label":"Wet Soil"}}
 
 Light (pick one or more):
-  {{"icon":"sun.max.fill","label":"Full Sun"}}
-  {{"icon":"cloud.sun.fill","label":"Part Shade"}}
-  {{"icon":"moon.fill","label":"Full Shade"}}
+  {{"icon":"sun.max.fill","label":"Full sun"}}
+  {{"icon":"cloud.sun.fill","label":"Semi-shade"}}
+  {{"icon":"moon.fill","label":"Full shade"}}
 
 Return ONLY a JSON array, no prose. Example:
-[{{"icon":"snowflake","label":"Fully Hardy"}},{{"icon":"drop.fill","label":"Well Drained"}},{{"icon":"sun.max.fill","label":"Full Sun"}}]"""
+[{{"icon":"snowflake","label":"Fully Hardy"}},{{"icon":"drop.fill","label":"Well drained soil"}},{{"icon":"sun.max.fill","label":"Full sun"}}]"""
 
         resp = client.models.generate_content(
             model="gemini-2.5-flash-lite",
@@ -369,8 +356,8 @@ Return ONLY a JSON array, no prose. Example:
         print(f"  [Warning] Gemini care info fallback failed: {e}")
         return [
             {"icon": "snowflake", "label": "Fully Hardy"},
-            {"icon": "drop.fill", "label": "Well Drained"},
-            {"icon": "sun.max.fill", "label": "Full Sun"},
+            {"icon": "drop.fill", "label": "Well drained soil"},
+            {"icon": "sun.max.fill", "label": "Full sun"},
         ]
 
 
