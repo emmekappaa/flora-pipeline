@@ -1058,6 +1058,9 @@ Return ONLY this JSON (fill every string value, no nulls):
 # ─────────────────────────────────────────────────────────────────── Step 7 ──
 # Upsert flower entry into flowers.dataset/flowers.json
 
+BATCH_START_DATE = date(2026, 5, 3)  # date assigned to the first flower (index 0)
+
+
 def step7_update_dataset(
     latin_name: str,
     slug: str,
@@ -1071,7 +1074,6 @@ def step7_update_dataset(
 ) -> dict:
     print("\n[Step 7] Updating flowers.dataset/flowers.json…")
 
-    today = date.today()
     final_name = (
         english.get("name")
         or wiki_data.get("name")
@@ -1089,9 +1091,9 @@ def step7_update_dataset(
         "infoImageName": f"{slug}-info",
         "infoImageAuthor": observer,
         "careInfo": care_info,
-        "year": today.year,
-        "month": today.month,
-        "day": today.day,
+        "year": 0,
+        "month": 0,
+        "day": 0,
         "wikiDescription": wiki_data.get("wikiDescription", ""),
         "habitat": english.get("habitat") or wiki_data.get("habitat", ""),
         "etymology": english.get("etymology") or wiki_data.get("etymology", ""),
@@ -1115,6 +1117,19 @@ def step7_update_dataset(
             existing = []
     else:
         existing = []
+
+    # Preserve date if flower already exists (upsert), otherwise assign next sequential date
+    prev = next((f for f in existing if f.get("latinName") == latin_name), None)
+    if prev:
+        flower_date = date(prev["year"], prev["month"], prev["day"])
+    else:
+        from datetime import timedelta
+        others = [f for f in existing if f.get("latinName") != latin_name]
+        flower_date = BATCH_START_DATE + timedelta(days=len(others))
+
+    flower["year"]  = flower_date.year
+    flower["month"] = flower_date.month
+    flower["day"]   = flower_date.day
 
     # Upsert: replace existing entry with same latinName, or append
     updated = [f for f in existing if f.get("latinName") != latin_name]
