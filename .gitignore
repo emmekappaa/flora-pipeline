@@ -2,3 +2,5 @@
 results.xcassets/
 __pycache__/
 *.pyc
+_temp/
+settings.local.json

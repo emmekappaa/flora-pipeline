@@ -1,0 +1,3 @@
+# Flora Agent — no extra deps beyond the shared pipeline requirements.
+# Install everything with:
+#   pip install -r ../flora_pipeline/requirements.txt

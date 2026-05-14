@@ -34,10 +34,11 @@ import sys
 from datetime import date
 from pathlib import Path
 
-# Load .env from the same directory as this script
+# Load .env — check this folder first, then the repo root
 try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).parent / ".env")
+    load_dotenv(Path(__file__).parent.parent / ".env")
 except ImportError:
     pass  # dotenv not installed — rely on shell env vars
 
